@@ -20,7 +20,7 @@ export function parseUSDC(amount: string): bigint {
 export function formatUSDC(units: bigint): string {
   const whole = units / 10n ** 6n
   const frac = (units % 10n ** 6n).toString().padStart(6, "0")
-  return `${whole}.${frac} USDC`
+  return `${whole}.${frac}`
 }
 
 export function sleep(ms: number) {

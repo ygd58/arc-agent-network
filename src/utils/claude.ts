@@ -25,6 +25,17 @@ export async function askClaude(prompt: string): Promise<string> {
 }
 
 function mockResponse(prompt: string): string {
+  // Evaluator prompt — "Evaluate objectively" içeriyor
+  if (prompt.includes("Evaluate objectively") || prompt.includes("objectively")) {
+    return JSON.stringify({
+      approved: true,
+      score: 88,
+      comment: "Deliverable meets all acceptance criteria. Well-structured and actionable.",
+      strengths: ["Clear methodology", "Actionable insights", "Meets requirements"],
+      improvements: ["Could include more data points"],
+      recommendation: "approve"
+    })
+  }
   if (prompt.includes("task") || prompt.includes("görev")) {
     return JSON.stringify({
       task: "Analyze Arc testnet transaction patterns and identify peak usage hours",
@@ -33,11 +44,13 @@ function mockResponse(prompt: string): string {
       deadline: "24 hours"
     })
   }
-  if (prompt.includes("evaluate") || prompt.includes("değerlendir")) {
+  if (prompt.includes("Evaluate") || prompt.includes("evaluate") || prompt.includes("değerlendir") || prompt.includes("assessment")) {
     return JSON.stringify({
       approved: true,
-      score: 85,
-      comment: "Analysis is thorough and well-structured. Deliverable meets requirements.",
+      score: 88,
+      comment: "Deliverable meets all acceptance criteria. Analysis is well-structured and actionable.",
+      strengths: ["Clear methodology", "Actionable insights", "Meets requirements"],
+      improvements: ["Could include more data points"],
       recommendation: "approve"
     })
   }

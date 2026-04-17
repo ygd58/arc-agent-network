@@ -3,6 +3,8 @@ import { generatePrivateKey } from "viem/accounts"
 import { ArcAgent } from "./agents/base.js"
 import { publicClient, formatUSDC, sleep } from "./utils/chain.js"
 import { CONTRACTS, USDC_ABI } from "./contracts/index.js"
+import { TASK_TEMPLATES } from "./tasks/types.js"
+import { orchestratorPrompt, workerPrompt, evaluatorPrompt } from "./tasks/prompts.js"
 import chalk from "chalk"
 
 console.log(chalk.cyan.bold(`
@@ -11,233 +13,142 @@ console.log(chalk.cyan.bold(`
  ███████  ██████  ██           
  ██    ██ ██   ██ ██           
  ██    ██ ██   ██  ██████      
-                               
- ▄▄▄·  ▄▄ •▄▄▄ . ▐ ▄ ▄▄▄▄▄   
-▐█ ▀█ ▐█ ▀ ▪▀▄.▀·•█▌▐█•██     
-▄█▀▀█ ▄█ ▀█▄▐▀▀▪▄▐█▐▐▌ ▐█.▪  
-▐█ ▪▐▌▐█▄▪▐█▐█▄▄▌██▐█▌ ▐█▌·  
- ▀  ▀ ·▀▀▀▀  ▀▀▀ ▀▀ █▪ ▀▀▀   
-                               
- ███    ██ ███████ ████████ ██     ██  ██████  ██████  ██   ██
- ████   ██ ██         ██    ██     ██ ██    ██ ██   ██ ██  ██ 
- ██ ██  ██ █████      ██    ██  █  ██ ██    ██ ██████  █████  
- ██  ██ ██ ██         ██    ██ ███ ██ ██    ██ ██   ██ ██  ██ 
- ██   ████ ███████    ██     ███ ███   ██████  ██   ██ ██   ██
 `))
-
 console.log(chalk.white.bold("  Arc Agent Network — Autonomous AI Agents on Arc Testnet\n"))
 console.log(chalk.gray("  ERC-8004 Identity + ERC-8183 Commerce + Claude AI\n"))
 
-async function checkBalance(address: string, label: string): Promise<bigint> {
+const args = process.argv.slice(2)
+const taskTypeArg = args[0]
+
+function showTaskMenu() {
+  console.log(chalk.cyan("  Available Task Types:\n"))
+  for (const [key, t] of Object.entries(TASK_TEMPLATES)) {
+    const diff = t.difficulty === "easy" ? chalk.green(t.difficulty) :
+                 t.difficulty === "medium" ? chalk.yellow(t.difficulty) :
+                 chalk.red(t.difficulty)
+    console.log("  " + chalk.white(key.padEnd(25)) + " " + diff + "  " + t.budget + " USDC")
+    console.log(chalk.gray("    " + t.title))
+    console.log()
+  }
+  console.log(chalk.gray("  Usage:   npx tsx src/index.ts <task_type>"))
+  console.log(chalk.gray("  Example: npx tsx src/index.ts data_analysis\n"))
+}
+
+async function checkBalance(address, label) {
   const bal = await publicClient.readContract({
-    address: CONTRACTS.USDC,
-    abi: USDC_ABI,
-    functionName: "balanceOf",
-    args: [address as `0x${string}`],
-  }) as bigint
-  console.log(`  ${label.padEnd(25)} ${formatUSDC(bal)}`)
+    address: CONTRACTS.USDC, abi: USDC_ABI,
+    functionName: "balanceOf", args: [address],
+  })
+  console.log("  " + label.padEnd(25) + " " + formatUSDC(bal) + " USDC")
   return bal
 }
 
 async function main() {
-  // Ortam değişkenlerinden private key'leri al
-  // Yoksa yeni oluştur (test için)
+  if (!taskTypeArg || !TASK_TEMPLATES[taskTypeArg]) {
+    showTaskMenu()
+    return
+  }
+
+  const task = TASK_TEMPLATES[taskTypeArg]
+
+  console.log(chalk.cyan("╔══ Task Type ══╗"))
+  console.log("  " + "Type".padEnd(20) + " " + task.type)
+  console.log("  " + "Title".padEnd(20) + " " + task.title)
+  console.log("  " + "Difficulty".padEnd(20) + " " + task.difficulty)
+  console.log("  " + "Budget".padEnd(20) + " " + task.budget + " USDC")
+  console.log("  " + "Skills".padEnd(20) + " " + task.requiredSkills.join(", "))
+
   const orchestratorKey = process.env.ORCHESTRATOR_KEY ?? generatePrivateKey()
   const workerKey       = process.env.WORKER_KEY       ?? generatePrivateKey()
   const evaluatorKey    = process.env.EVALUATOR_KEY    ?? generatePrivateKey()
 
-  // 3 Agent oluştur
-  const orchestrator = new ArcAgent({
-    name: "Orchestrator",
-    role: "orchestrator",
-    privateKey: orchestratorKey,
-    capabilities: ["task-planning", "resource-allocation", "coordination"],
-  })
+  const orchestrator = new ArcAgent({ name: "Orchestrator", role: "orchestrator", privateKey: orchestratorKey, capabilities: ["task-planning", "coordination"] })
+  const worker       = new ArcAgent({ name: "Worker",       role: "worker",       privateKey: workerKey,       capabilities: task.requiredSkills })
+  const evaluator    = new ArcAgent({ name: "Evaluator",    role: "evaluator",    privateKey: evaluatorKey,    capabilities: ["quality-assessment", task.type] })
 
-  const worker = new ArcAgent({
-    name: "Worker",
-    role: "worker",
-    privateKey: workerKey,
-    capabilities: ["data-analysis", "blockchain", "research"],
-  })
+  console.log(chalk.cyan("\n╔══ Agent Network ══╗"))
+  console.log("  " + "Orchestrator".padEnd(15) + " " + orchestrator.address)
+  console.log("  " + "Worker".padEnd(15) + " " + worker.address)
+  console.log("  " + "Evaluator".padEnd(15) + " " + evaluator.address)
 
-  const evaluator = new ArcAgent({
-    name: "Evaluator",
-    role: "evaluator",
-    privateKey: evaluatorKey,
-    capabilities: ["quality-assessment", "verification"],
-  })
+  console.log(chalk.cyan("\n╔══ Balances ══╗"))
+  const orchBal = await checkBalance(orchestrator.address, "Orchestrator")
+  const workBal = await checkBalance(worker.address, "Worker")
+  await checkBalance(evaluator.address, "Evaluator")
 
-  console.log(chalk.cyan("╔══ Agent Ağı / Agent Network ══╗"))
-  console.log(`  ${"Orchestrator".padEnd(15)} ${orchestrator.address}`)
-  console.log(`  ${"Worker".padEnd(15)} ${worker.address}`)
-  console.log(`  ${"Evaluator".padEnd(15)} ${evaluator.address}`)
-
-  // Bakiye kontrol
-  console.log(chalk.cyan("\n╔══ Bakiyeler / Balances ══╗"))
-  const orchBal  = await checkBalance(orchestrator.address, "Orchestrator")
-  const workBal  = await checkBalance(worker.address,       "Worker")
-  const evalBal  = await checkBalance(evaluator.address,    "Evaluator")
-
-  // Minimum bakiye kontrolü
-  const minBal = 3_000_000n // 3 USDC minimum
+  const minBal = BigInt(parseFloat(task.budget) * 1e6) + 1_000_000n
   if (orchBal < minBal) {
-    console.log(chalk.red(`\n✗ Orchestrator yetersiz bakiye: ${formatUSDC(orchBal)}`))
-    console.log(chalk.yellow(`  Faucet: https://faucet.circle.com`))
-    console.log(chalk.yellow(`  Adres:  ${orchestrator.address}`))
-    console.log(chalk.gray(`\n  Hızlı test için env set et:`))
-    console.log(chalk.gray(`  export ORCHESTRATOR_KEY=0xSENIN_PRIVATE_KEY`))
-    console.log(chalk.gray(`  export WORKER_KEY=0xSENIN_PRIVATE_KEY`))
-    console.log(chalk.gray(`  export EVALUATOR_KEY=0xSENIN_PRIVATE_KEY\n`))
+    console.log(chalk.red("\n✗ Insufficient balance: " + formatUSDC(orchBal) + " USDC"))
+    console.log(chalk.yellow("  Required: " + task.budget + " USDC"))
+    console.log(chalk.yellow("  Faucet: https://faucet.circle.com"))
+    console.log(chalk.yellow("  Address: " + orchestrator.address + "\n"))
     return
   }
 
-  // ── FAZA 1: ERC-8004 Kayıt ──────────────────────────────────
-  console.log(chalk.cyan("\n╔══ Faz 1: ERC-8004 Agent Kaydı ══╗"))
-
+  console.log(chalk.cyan("\n╔══ Phase 1: ERC-8004 Registration ══╗"))
   await orchestrator.register()
-  await sleep(1000)
+  await sleep(800)
   await worker.register()
-  await sleep(1000)
+  await sleep(800)
   await evaluator.register()
-  await sleep(1000)
 
-  console.log(chalk.green("\n✓ 3 agent zincire kaydedildi"))
-
-  // ── FAZA 2: Orchestrator görev belirle ──────────────────────
-  console.log(chalk.cyan("\n╔══ Faz 2: AI Görev Belirleme ══╗"))
-
-  const taskPrompt = `
-    You are an orchestrator agent on Arc blockchain testnet.
-    Generate a specific, measurable task for a worker agent.
-    Worker capabilities: ${worker.capabilities.join(", ")}
-    
-    Respond ONLY with valid JSON (no markdown):
-    {"task": "...", "skills": [...], "budget": "1.0", "deadline": "24 hours"}
-  `
-
-  const taskResponse = await orchestrator.think(taskPrompt)
-  let taskData: any = {}
-  try {
-    taskData = JSON.parse(taskResponse)
-  } catch {
-    taskData = { task: "Analyze Arc testnet block patterns", budget: "1.0" }
+  console.log(chalk.cyan("\n╔══ Phase 2: Task Assignment ══╗"))
+  const assignmentRaw = await orchestrator.think(orchestratorPrompt(task, worker.capabilities))
+  let assignment = {}
+  try { assignment = JSON.parse(assignmentRaw) } catch { assignment = { task: task.description, budget: task.budget } }
+  orchestrator.log(chalk.white("Task: " + (assignment.task ?? "").slice(0, 70) + "..."))
+  if (assignment.acceptance_criteria) {
+    assignment.acceptance_criteria.forEach(c => orchestrator.log(chalk.gray("  ✓ " + c)))
   }
 
-  orchestrator.log(chalk.white(`📋 Görev: ${taskData.task}`))
-  orchestrator.log(chalk.white(`💰 Bütçe: ${taskData.budget} USDC`))
+  console.log(chalk.cyan("\n╔══ Phase 3: ERC-8183 Job + Escrow ══╗"))
+  const jobId = await orchestrator.createJob(worker.address, evaluator.address, "[" + task.type.toUpperCase() + "] " + (assignment.task ?? task.description), task.budget)
 
-  // ── FAZA 3: ERC-8183 İş Oluştur ─────────────────────────────
-  console.log(chalk.cyan("\n╔══ Faz 3: ERC-8183 İş Oluştur ══╗"))
-
-  const jobId = await orchestrator.createJob(
-    worker.address,
-    evaluator.address,
-    taskData.task,
-    taskData.budget ?? "1.0"
-  )
-
-  // ── FAZA 4: Worker işi teslim et ────────────────────────────
-  console.log(chalk.cyan("\n╔══ Faz 4: Worker AI Çalışıyor ══╗"))
-  await sleep(2000)
-
-  const workPrompt = `
-    You are a worker agent on Arc blockchain testnet.
-    Complete this task: "${taskData.task}"
-    
-    Respond ONLY with valid JSON (no markdown):
-    {"result": "...", "methodology": "...", "confidence": 0.95}
-  `
-
-  const workResponse = await worker.think(workPrompt)
-  let workData: any = {}
-  try {
-    workData = JSON.parse(workResponse)
-  } catch {
-    workData = { result: workResponse }
+  console.log(chalk.cyan("\n╔══ Phase 4: Worker Executing ══╗"))
+  await sleep(1500)
+  const deliveryRaw = await worker.think(workerPrompt(task, assignment))
+  let delivery = {}
+  try { delivery = JSON.parse(deliveryRaw) } catch { delivery = { result: deliveryRaw } }
+  worker.log(chalk.white("Result: " + (delivery.result ?? "").slice(0, 80) + "..."))
+  if (delivery.key_findings) {
+    delivery.key_findings.slice(0, 3).forEach(f => worker.log(chalk.gray("  → " + f)))
   }
+  await worker.submitJob(jobId, JSON.stringify(delivery))
 
-  worker.log(chalk.white(`📊 Sonuç: ${workData.result?.slice(0, 80)}...`))
-  await worker.submitJob(jobId, JSON.stringify(workData))
+  console.log(chalk.cyan("\n╔══ Phase 5: Evaluator Reviewing ══╗"))
+  await sleep(1500)
+  const evalRaw = await evaluator.think(evaluatorPrompt(task, assignment, delivery))
+  let evaluation = {}
+  try { evaluation = JSON.parse(evalRaw) } catch { evaluation = { approved: true, score: 80, comment: "Completed" } }
+  evaluator.log(chalk.white("Score: " + evaluation.score + "/100"))
+  evaluator.log(chalk.white(evaluation.comment ?? ""))
+  if (evaluation.strengths) evaluation.strengths.forEach(s => evaluator.log(chalk.green("  + " + s)))
+  if (evaluation.improvements) evaluation.improvements.forEach(i => evaluator.log(chalk.yellow("  ~ " + i)))
 
-  // ── FAZA 5: Evaluator değerlendir ───────────────────────────
-  console.log(chalk.cyan("\n╔══ Faz 5: Evaluator AI Değerlendiriyor ══╗"))
-  await sleep(2000)
-
-  const evalPrompt = `
-    You are an evaluator agent on Arc blockchain testnet.
-    Task was: "${taskData.task}"
-    Worker delivered: "${JSON.stringify(workData)}"
-    
-    Evaluate the work quality. Respond ONLY with valid JSON (no markdown):
-    {"approved": true, "score": 85, "comment": "...", "recommendation": "approve"}
-  `
-
-  const evalResponse = await evaluator.think(evalPrompt)
-  let evalData: any = {}
-  try {
-    evalData = JSON.parse(evalResponse)
-  } catch {
-    evalData = { approved: true, score: 80, comment: "Work completed satisfactorily" }
-  }
-
-  evaluator.log(chalk.white(`📝 Değerlendirme: ${evalData.comment}`))
-  evaluator.log(chalk.white(`⭐ Skor: ${evalData.score}/100`))
-
-  // ── FAZA 6: Onayla + Ödeme ──────────────────────────────────
-  console.log(chalk.cyan("\n╔══ Faz 6: Onchain Settlement ══╗"))
-
-  if (evalData.approved !== false) {
+  console.log(chalk.cyan("\n╔══ Phase 6: Onchain Settlement ══╗"))
+  if (evaluation.approved !== false && evaluation.recommendation !== "reject") {
     await evaluator.completeJob(jobId)
-    await sleep(1000)
-
-    // ERC-8004 reputation kaydet (farklı cüzdan gerektirir)
-    try {
-      await evaluator.recordReputation(
-        worker.agentId,
-        evalData.score ?? 80,
-        evalData.comment ?? "Good work"
-      )
-    } catch {
-      evaluator.log("ℹ️  Reputation: aynı cüzdanla self-record yapılamaz (ERC-8004 kural)")
-    }
+    await sleep(800)
+    try { await evaluator.recordReputation(worker.agentId, evaluation.score ?? 80, evaluation.comment ?? "Good work") }
+    catch { evaluator.log(chalk.gray("ℹ️  Reputation requires different wallet")) }
+  } else {
+    evaluator.log(chalk.red("✗ Job rejected"))
   }
 
-  // ── SONUÇ ────────────────────────────────────────────────────
-  console.log(chalk.cyan("\n╔══ Sonuç / Result ══╗"))
+  const orchBalAfter = await publicClient.readContract({ address: CONTRACTS.USDC, abi: USDC_ABI, functionName: "balanceOf", args: [orchestrator.address] })
+  const workBalAfter = await publicClient.readContract({ address: CONTRACTS.USDC, abi: USDC_ABI, functionName: "balanceOf", args: [worker.address] })
 
-  const orchBalAfter = await publicClient.readContract({
-    address: CONTRACTS.USDC, abi: USDC_ABI,
-    functionName: "balanceOf", args: [orchestrator.address],
-  }) as bigint
-
-  const workBalAfter = await publicClient.readContract({
-    address: CONTRACTS.USDC, abi: USDC_ABI,
-    functionName: "balanceOf", args: [worker.address],
-  }) as bigint
-
-  console.log(chalk.green(`
-  ✓ Agent Network Tamamlandı!
-
-  ERC-8004 Kayıtlar:
-    Orchestrator  #${orchestrator.agentId}
-    Worker        #${worker.agentId}
-    Evaluator     #${evaluator.agentId}
-
-  ERC-8183 İş:
-    Job ID        #${jobId}
-    Görev         ${taskData.task?.slice(0, 60)}
-    Durum         Completed ✓
-
-  Ödeme:
-    Orchestrator  ${formatUSDC(orchBal)} → ${formatUSDC(orchBalAfter)}
-    Worker        ${formatUSDC(workBal)} → ${formatUSDC(workBalAfter)}
-
-  Explorer: https://testnet.arcscan.app
-  `))
+  console.log(chalk.green("\n╔══ Result ══╗"))
+  console.log("  Task Type:     " + task.type)
+  console.log("  Orchestrator:  #" + orchestrator.agentId)
+  console.log("  Worker:        #" + worker.agentId)
+  console.log("  Evaluator:     #" + evaluator.agentId)
+  console.log("  Job ID:        #" + jobId)
+  console.log("  Status:        " + (evaluation.approved !== false ? "Completed ✓" : "Rejected ✗"))
+  console.log("  Score:         " + evaluation.score + "/100")
+  console.log("  Orchestrator:  " + formatUSDC(orchBal) + " → " + formatUSDC(orchBalAfter) + " USDC")
+  console.log("  Worker:        " + formatUSDC(workBal) + " → " + formatUSDC(workBalAfter) + " USDC")
+  console.log("  Explorer:      https://testnet.arcscan.app\n")
 }
 
-main().catch(e => {
-  console.error(chalk.red(`\n✗ Hata: ${e.message}\n`))
-  process.exit(1)
-})
+main().catch(e => { console.error(chalk.red("\n✗ Error: " + e.message + "\n")); process.exit(1) })
