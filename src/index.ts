@@ -5,6 +5,7 @@ import { publicClient, formatUSDC, sleep } from "./utils/chain.js"
 import { CONTRACTS, USDC_ABI } from "./contracts/index.js"
 import { TASK_TEMPLATES } from "./tasks/types.js"
 import { orchestratorPrompt, workerPrompt, evaluatorPrompt } from "./tasks/prompts.js"
+import { workerBid, selectBestWorker, displayAuction } from "./tasks/auction.js"
 import chalk from "chalk"
 
 console.log(chalk.cyan.bold(`
@@ -19,6 +20,10 @@ console.log(chalk.gray("  ERC-8004 Identity + ERC-8183 Commerce + Claude AI\n"))
 
 const args = process.argv.slice(2)
 const taskTypeArg = args[0]
+const multiWorker = args.includes("--multi-worker")
+const workerCount = args.includes("--workers") 
+  ? parseInt(args[args.indexOf("--workers") + 1]) 
+  : 3
 
 function showTaskMenu() {
   console.log(chalk.cyan("  Available Task Types:\n"))
@@ -30,8 +35,12 @@ function showTaskMenu() {
     console.log(chalk.gray("    " + t.title))
     console.log()
   }
-  console.log(chalk.gray("  Usage:   npx tsx src/index.ts <task_type>"))
-  console.log(chalk.gray("  Example: npx tsx src/index.ts data_analysis\n"))
+  console.log(chalk.gray("  Usage:"))
+  console.log(chalk.gray("    npx tsx src/index.ts <task_type>"))
+  console.log(chalk.gray("    npx tsx src/index.ts <task_type> --multi-worker"))
+  console.log(chalk.gray("    npx tsx src/index.ts <task_type> --multi-worker --workers 4"))
+  console.log(chalk.gray("  Example:"))
+  console.log(chalk.gray("    npx tsx src/index.ts data_analysis --multi-worker\n"))
 }
 
 async function checkBalance(address, label) {
@@ -50,31 +59,43 @@ async function main() {
   }
 
   const task = TASK_TEMPLATES[taskTypeArg]
+  const mode = multiWorker ? chalk.cyan("MULTI-WORKER AUCTION") : chalk.white("SINGLE WORKER")
 
   console.log(chalk.cyan("╔══ Task Type ══╗"))
   console.log("  " + "Type".padEnd(20) + " " + task.type)
   console.log("  " + "Title".padEnd(20) + " " + task.title)
   console.log("  " + "Difficulty".padEnd(20) + " " + task.difficulty)
   console.log("  " + "Budget".padEnd(20) + " " + task.budget + " USDC")
-  console.log("  " + "Skills".padEnd(20) + " " + task.requiredSkills.join(", "))
+  console.log("  " + "Mode".padEnd(20) + " " + mode)
+  if (multiWorker) console.log("  " + "Workers".padEnd(20) + " " + workerCount + " competing")
 
   const orchestratorKey = process.env.ORCHESTRATOR_KEY ?? generatePrivateKey()
-  const workerKey       = process.env.WORKER_KEY       ?? generatePrivateKey()
   const evaluatorKey    = process.env.EVALUATOR_KEY    ?? generatePrivateKey()
 
   const orchestrator = new ArcAgent({ name: "Orchestrator", role: "orchestrator", privateKey: orchestratorKey, capabilities: ["task-planning", "coordination"] })
-  const worker       = new ArcAgent({ name: "Worker",       role: "worker",       privateKey: workerKey,       capabilities: task.requiredSkills })
   const evaluator    = new ArcAgent({ name: "Evaluator",    role: "evaluator",    privateKey: evaluatorKey,    capabilities: ["quality-assessment", task.type] })
+
+  // Workers oluştur
+  const workerKeys = []
+  for (let i = 0; i < (multiWorker ? workerCount : 1); i++) {
+    workerKeys.push(process.env["WORKER_KEY_" + (i+1)] ?? process.env.WORKER_KEY ?? generatePrivateKey())
+  }
+
+  const workers = workerKeys.map((key, i) => new ArcAgent({
+    name: "Worker-" + (i+1),
+    role: "worker",
+    privateKey: key,
+    capabilities: task.requiredSkills,
+  }))
 
   console.log(chalk.cyan("\n╔══ Agent Network ══╗"))
   console.log("  " + "Orchestrator".padEnd(15) + " " + orchestrator.address)
-  console.log("  " + "Worker".padEnd(15) + " " + worker.address)
+  workers.forEach(w => console.log("  " + w.name.padEnd(15) + " " + w.address))
   console.log("  " + "Evaluator".padEnd(15) + " " + evaluator.address)
 
   console.log(chalk.cyan("\n╔══ Balances ══╗"))
   const orchBal = await checkBalance(orchestrator.address, "Orchestrator")
-  const workBal = await checkBalance(worker.address, "Worker")
-  await checkBalance(evaluator.address, "Evaluator")
+  for (const w of workers) await checkBalance(w.address, w.name)
 
   const minBal = BigInt(parseFloat(task.budget) * 1e6) + 1_000_000n
   if (orchBal < minBal) {
@@ -85,37 +106,60 @@ async function main() {
     return
   }
 
+  // Phase 1: ERC-8004
   console.log(chalk.cyan("\n╔══ Phase 1: ERC-8004 Registration ══╗"))
   await orchestrator.register()
-  await sleep(800)
-  await worker.register()
-  await sleep(800)
+  await sleep(600)
+  for (const w of workers) { await w.register(); await sleep(600) }
   await evaluator.register()
 
+  // Phase 2: Task Assignment
   console.log(chalk.cyan("\n╔══ Phase 2: Task Assignment ══╗"))
-  const assignmentRaw = await orchestrator.think(orchestratorPrompt(task, worker.capabilities))
+  const assignmentRaw = await orchestrator.think(orchestratorPrompt(task, workers[0].capabilities))
   let assignment = {}
   try { assignment = JSON.parse(assignmentRaw) } catch { assignment = { task: task.description, budget: task.budget } }
   orchestrator.log(chalk.white("Task: " + (assignment.task ?? "").slice(0, 70) + "..."))
-  if (assignment.acceptance_criteria) {
-    assignment.acceptance_criteria.forEach(c => orchestrator.log(chalk.gray("  ✓ " + c)))
+
+  // Phase 3: Worker Auction (multi-worker mode)
+  let selectedWorker = workers[0]
+  if (multiWorker && workers.length > 1) {
+    console.log(chalk.cyan("\n╔══ Phase 3: Worker Auction ══╗"))
+    orchestrator.log(chalk.white("Collecting bids from " + workers.length + " workers..."))
+
+    const bids = []
+    for (const w of workers) {
+      const bid = await workerBid(w, task)
+      w.log(chalk.white("Bid: " + bid.price + " USDC | " + bid.estimatedTime + " | " + bid.approach.slice(0, 50)))
+      bids.push(bid)
+      await sleep(500)
+    }
+
+    const result = await selectBestWorker(orchestrator, bids, task)
+    displayAuction(bids, result)
+    selectedWorker = result.winner
   }
 
-  console.log(chalk.cyan("\n╔══ Phase 3: ERC-8183 Job + Escrow ══╗"))
-  const jobId = await orchestrator.createJob(worker.address, evaluator.address, "[" + task.type.toUpperCase() + "] " + (assignment.task ?? task.description), task.budget)
+  // Phase 4: ERC-8183 Job
+  console.log(chalk.cyan("\n╔══ Phase " + (multiWorker ? "4" : "3") + ": ERC-8183 Job + Escrow ══╗"))
+  const jobId = await orchestrator.createJob(
+    selectedWorker.address,
+    evaluator.address,
+    "[" + task.type.toUpperCase() + "] " + (assignment.task ?? task.description),
+    task.budget
+  )
 
-  console.log(chalk.cyan("\n╔══ Phase 4: Worker Executing ══╗"))
+  // Phase 5: Worker Execute
+  console.log(chalk.cyan("\n╔══ Phase " + (multiWorker ? "5" : "4") + ": Worker Executing ══╗"))
   await sleep(1500)
-  const deliveryRaw = await worker.think(workerPrompt(task, assignment))
+  const deliveryRaw = await selectedWorker.think(workerPrompt(task, assignment))
   let delivery = {}
   try { delivery = JSON.parse(deliveryRaw) } catch { delivery = { result: deliveryRaw } }
-  worker.log(chalk.white("Result: " + (delivery.result ?? "").slice(0, 80) + "..."))
-  if (delivery.key_findings) {
-    delivery.key_findings.slice(0, 3).forEach(f => worker.log(chalk.gray("  → " + f)))
-  }
-  await worker.submitJob(jobId, JSON.stringify(delivery))
+  selectedWorker.log(chalk.white("Result: " + (delivery.result ?? "").slice(0, 80) + "..."))
+  if (delivery.key_findings) delivery.key_findings.slice(0, 3).forEach(f => selectedWorker.log(chalk.gray("  → " + f)))
+  await selectedWorker.submitJob(jobId, JSON.stringify(delivery))
 
-  console.log(chalk.cyan("\n╔══ Phase 5: Evaluator Reviewing ══╗"))
+  // Phase 6: Evaluate
+  console.log(chalk.cyan("\n╔══ Phase " + (multiWorker ? "6" : "5") + ": Evaluator Reviewing ══╗"))
   await sleep(1500)
   const evalRaw = await evaluator.think(evaluatorPrompt(task, assignment, delivery))
   let evaluation = {}
@@ -125,29 +169,31 @@ async function main() {
   if (evaluation.strengths) evaluation.strengths.forEach(s => evaluator.log(chalk.green("  + " + s)))
   if (evaluation.improvements) evaluation.improvements.forEach(i => evaluator.log(chalk.yellow("  ~ " + i)))
 
-  console.log(chalk.cyan("\n╔══ Phase 6: Onchain Settlement ══╗"))
+  // Phase 7: Settlement
+  console.log(chalk.cyan("\n╔══ Phase " + (multiWorker ? "7" : "6") + ": Onchain Settlement ══╗"))
   if (evaluation.approved !== false && evaluation.recommendation !== "reject") {
     await evaluator.completeJob(jobId)
     await sleep(800)
-    try { await evaluator.recordReputation(worker.agentId, evaluation.score ?? 80, evaluation.comment ?? "Good work") }
+    try { await evaluator.recordReputation(selectedWorker.agentId, evaluation.score ?? 80, evaluation.comment ?? "Good work") }
     catch { evaluator.log(chalk.gray("ℹ️  Reputation requires different wallet")) }
   } else {
     evaluator.log(chalk.red("✗ Job rejected"))
   }
 
   const orchBalAfter = await publicClient.readContract({ address: CONTRACTS.USDC, abi: USDC_ABI, functionName: "balanceOf", args: [orchestrator.address] })
-  const workBalAfter = await publicClient.readContract({ address: CONTRACTS.USDC, abi: USDC_ABI, functionName: "balanceOf", args: [worker.address] })
+  const winnerBalAfter = await publicClient.readContract({ address: CONTRACTS.USDC, abi: USDC_ABI, functionName: "balanceOf", args: [selectedWorker.address] })
+  const orchBal2 = await publicClient.readContract({ address: CONTRACTS.USDC, abi: USDC_ABI, functionName: "balanceOf", args: [orchestrator.address] })
 
   console.log(chalk.green("\n╔══ Result ══╗"))
   console.log("  Task Type:     " + task.type)
+  console.log("  Mode:          " + (multiWorker ? "Multi-Worker Auction" : "Single Worker"))
+  if (multiWorker) console.log("  Workers:       " + workers.length + " competed, " + selectedWorker.name + " won")
   console.log("  Orchestrator:  #" + orchestrator.agentId)
-  console.log("  Worker:        #" + worker.agentId)
+  console.log("  Winner:        " + selectedWorker.name + " #" + selectedWorker.agentId)
   console.log("  Evaluator:     #" + evaluator.agentId)
   console.log("  Job ID:        #" + jobId)
   console.log("  Status:        " + (evaluation.approved !== false ? "Completed ✓" : "Rejected ✗"))
   console.log("  Score:         " + evaluation.score + "/100")
-  console.log("  Orchestrator:  " + formatUSDC(orchBal) + " → " + formatUSDC(orchBalAfter) + " USDC")
-  console.log("  Worker:        " + formatUSDC(workBal) + " → " + formatUSDC(workBalAfter) + " USDC")
   console.log("  Explorer:      https://testnet.arcscan.app\n")
 }
 
