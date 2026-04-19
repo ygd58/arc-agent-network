@@ -27,14 +27,35 @@ export async function askClaude(prompt: string): Promise<string> {
 function mockResponse(prompt: string): string {
   // Evaluator prompt — "Evaluate objectively" içeriyor
   if (prompt.includes("Evaluate objectively") || prompt.includes("objectively")) {
-    return JSON.stringify({
-      approved: true,
-      score: 88,
-      comment: "Deliverable meets all acceptance criteria. Well-structured and actionable.",
-      strengths: ["Clear methodology", "Actionable insights", "Meets requirements"],
-      improvements: ["Could include more data points"],
-      recommendation: "approve"
-    })
+    // Retry sayısını prompt'tan çıkar
+    // İlk çağrıda reddet, ikinci çağrıda onayla
+    // evaluateCount ile takip et
+    if (!globalThis._evalCount) globalThis._evalCount = 0
+    globalThis._evalCount++
+    if (globalThis._evalCount === 1) {
+      return JSON.stringify({
+        approved: false,
+        score: 45,
+        comment: "Deliverable lacks sufficient detail and specific data points.",
+        criteria_met: ["Basic structure present"],
+        criteria_failed: ["Missing specific metrics", "No methodology explanation", "Insufficient data coverage"],
+        strengths: ["Correct format"],
+        improvements: ["Include specific TPS numbers", "Add time-based analysis", "Provide data sources"],
+        recommendation: "reject"
+      })
+    } else {
+      globalThis._evalCount = 0
+      return JSON.stringify({
+        approved: true,
+        score: 91,
+        comment: "Significantly improved. Deliverable now meets all acceptance criteria.",
+        criteria_met: ["Specific metrics included", "Methodology explained", "Data coverage sufficient"],
+        criteria_failed: [],
+        strengths: ["Clear improvements from previous attempt", "Actionable insights", "Strong methodology"],
+        improvements: ["Minor: could add confidence intervals"],
+        recommendation: "approve"
+      })
+    }
   }
   if (prompt.includes("task") || prompt.includes("görev")) {
     return JSON.stringify({

@@ -176,6 +176,32 @@ export class ArcAgent {
     this.log(chalk.green(`✓ İş tamamlandı — USDC ödendi`))
   }
 
+  // ERC-8183: İşi reddet
+  async rejectJob(jobId: bigint, reason: string) {
+    const hash = await this.clients.wallet.writeContract({
+      address: CONTRACTS.AGENTIC_COMMERCE,
+      abi: COMMERCE_ABI,
+      functionName: "complete",
+      args: [jobId, keccak256(toHex("rejected-" + reason)) as `0x${string}`, "0x"],
+    })
+    await publicClient.waitForTransactionReceipt({ hash })
+    this.log(chalk.red(`✗ İş reddedildi — Job #${jobId}`))
+    this.log(chalk.gray(`  Sebep: ${reason}`))
+  }
+
+  // ERC-8183: İşi reddet
+  async rejectJob(jobId: bigint, reason: string) {
+    const hash = await this.clients.wallet.writeContract({
+      address: CONTRACTS.AGENTIC_COMMERCE,
+      abi: COMMERCE_ABI,
+      functionName: "complete",
+      args: [jobId, keccak256(toHex("rejected-" + reason)) as `0x${string}`, "0x"],
+    })
+    await publicClient.waitForTransactionReceipt({ hash })
+    this.log(chalk.red(`✗ İş reddedildi — Job #${jobId}`))
+    this.log(chalk.gray(`  Sebep: ${reason}`))
+  }
+
   // Claude API ile karar al
   async think(prompt: string): Promise<string> {
     this.log(chalk.gray(`🤔 Düşünüyor...`))

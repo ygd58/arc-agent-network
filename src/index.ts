@@ -6,6 +6,7 @@ import { CONTRACTS, USDC_ABI } from "./contracts/index.js"
 import { TASK_TEMPLATES } from "./tasks/types.js"
 import { orchestratorPrompt, workerPrompt, evaluatorPrompt } from "./tasks/prompts.js"
 import { workerBid, selectBestWorker, displayAuction } from "./tasks/auction.js"
+import { runWithRetry } from "./tasks/retry.js"
 import chalk from "chalk"
 
 console.log(chalk.cyan.bold(`
@@ -24,6 +25,10 @@ const multiWorker = args.includes("--multi-worker")
 const workerCount = args.includes("--workers") 
   ? parseInt(args[args.indexOf("--workers") + 1]) 
   : 3
+const retryMode = args.includes("--retry")
+const maxAttempts = args.includes("--max-attempts")
+  ? parseInt(args[args.indexOf("--max-attempts") + 1])
+  : 3
 
 function showTaskMenu() {
   console.log(chalk.cyan("  Available Task Types:\n"))
@@ -40,7 +45,9 @@ function showTaskMenu() {
   console.log(chalk.gray("    npx tsx src/index.ts <task_type> --multi-worker"))
   console.log(chalk.gray("    npx tsx src/index.ts <task_type> --multi-worker --workers 4"))
   console.log(chalk.gray("  Example:"))
-  console.log(chalk.gray("    npx tsx src/index.ts data_analysis --multi-worker\n"))
+  console.log(chalk.gray("    npx tsx src/index.ts data_analysis --multi-worker"))
+  console.log(chalk.gray("    npx tsx src/index.ts data_analysis --retry"))
+  console.log(chalk.gray("    npx tsx src/index.ts data_analysis --retry --max-attempts 3\n"))
 }
 
 async function checkBalance(address, label) {
@@ -68,6 +75,7 @@ async function main() {
   console.log("  " + "Budget".padEnd(20) + " " + task.budget + " USDC")
   console.log("  " + "Mode".padEnd(20) + " " + mode)
   if (multiWorker) console.log("  " + "Workers".padEnd(20) + " " + workerCount + " competing")
+  if (retryMode) console.log("  " + "Retry Mode".padEnd(20) + " " + chalk.yellow("ON (max " + maxAttempts + " attempts)"))
 
   const orchestratorKey = process.env.ORCHESTRATOR_KEY ?? generatePrivateKey()
   const evaluatorKey    = process.env.EVALUATOR_KEY    ?? generatePrivateKey()
@@ -148,53 +156,68 @@ async function main() {
     task.budget
   )
 
-  // Phase 5: Worker Execute
-  console.log(chalk.cyan("\n╔══ Phase " + (multiWorker ? "5" : "4") + ": Worker Executing ══╗"))
-  await sleep(1500)
-  const deliveryRaw = await selectedWorker.think(workerPrompt(task, assignment))
-  let delivery = {}
-  try { delivery = JSON.parse(deliveryRaw) } catch { delivery = { result: deliveryRaw } }
-  selectedWorker.log(chalk.white("Result: " + (delivery.result ?? "").slice(0, 80) + "..."))
-  if (delivery.key_findings) delivery.key_findings.slice(0, 3).forEach(f => selectedWorker.log(chalk.gray("  → " + f)))
-  await selectedWorker.submitJob(jobId, JSON.stringify(delivery))
+  if (retryMode) {
+    // RETRY FLOW
+    console.log(chalk.cyan("\n╔══ Phase " + (multiWorker ? "5" : "4") + ": Worker Execute + Retry ══╗"))
+    await sleep(1000)
+    const retryResult = await runWithRetry(orchestrator, selectedWorker, evaluator, task, assignment, jobId, maxAttempts)
 
-  // Phase 6: Evaluate
-  console.log(chalk.cyan("\n╔══ Phase " + (multiWorker ? "6" : "5") + ": Evaluator Reviewing ══╗"))
-  await sleep(1500)
-  const evalRaw = await evaluator.think(evaluatorPrompt(task, assignment, delivery))
-  let evaluation = {}
-  try { evaluation = JSON.parse(evalRaw) } catch { evaluation = { approved: true, score: 80, comment: "Completed" } }
-  evaluator.log(chalk.white("Score: " + evaluation.score + "/100"))
-  evaluator.log(chalk.white(evaluation.comment ?? ""))
-  if (evaluation.strengths) evaluation.strengths.forEach(s => evaluator.log(chalk.green("  + " + s)))
-  if (evaluation.improvements) evaluation.improvements.forEach(i => evaluator.log(chalk.yellow("  ~ " + i)))
+    console.log(chalk.cyan("\n╔══ Phase " + (multiWorker ? "6" : "5") + ": Onchain Settlement ══╗"))
+    if (retryResult.approved) {
+      await evaluator.completeJob(jobId)
+      await sleep(800)
+      try { await evaluator.recordReputation(selectedWorker.agentId, retryResult.score, retryResult.comment) }
+      catch { evaluator.log(chalk.gray("ℹ️  Reputation requires different wallet")) }
+    } else {
+      evaluator.log(chalk.red("✗ Job failed after " + maxAttempts + " attempts — escrow refundable"))
+    }
 
-  // Phase 7: Settlement
-  console.log(chalk.cyan("\n╔══ Phase " + (multiWorker ? "7" : "6") + ": Onchain Settlement ══╗"))
-  if (evaluation.approved !== false && evaluation.recommendation !== "reject") {
-    await evaluator.completeJob(jobId)
-    await sleep(800)
-    try { await evaluator.recordReputation(selectedWorker.agentId, evaluation.score ?? 80, evaluation.comment ?? "Good work") }
-    catch { evaluator.log(chalk.gray("ℹ️  Reputation requires different wallet")) }
+    console.log(chalk.green("\n╔══ Result ══╗"))
+    console.log("  Task Type:     " + task.type)
+    console.log("  Mode:          " + (multiWorker ? "Multi-Worker + Retry" : "Single Worker + Retry"))
+    console.log("  Attempts:      " + retryResult.attempt + "/" + maxAttempts)
+    console.log("  Orchestrator:  #" + orchestrator.agentId)
+    console.log("  Worker:        " + selectedWorker.name + " #" + selectedWorker.agentId)
+    console.log("  Evaluator:     #" + evaluator.agentId)
+    console.log("  Job ID:        #" + jobId)
+    console.log("  Status:        " + (retryResult.approved ? "Completed ✓" : "Failed after " + maxAttempts + " attempts ✗"))
+    console.log("  Final Score:   " + retryResult.score + "/100")
+    console.log("  Explorer:      https://testnet.arcscan.app\n")
+
   } else {
-    evaluator.log(chalk.red("✗ Job rejected"))
+    // NORMAL FLOW
+    console.log(chalk.cyan("\n╔══ Phase " + (multiWorker ? "6" : "5") + ": Evaluator Reviewing ══╗"))
+    await sleep(1500)
+    const evalRaw = await evaluator.think(evaluatorPrompt(task, assignment, delivery))
+    let evaluation = {}
+    try { evaluation = JSON.parse(evalRaw) } catch { evaluation = { approved: true, score: 80, comment: "Completed" } }
+    evaluator.log(chalk.white("Score: " + evaluation.score + "/100"))
+    evaluator.log(chalk.white(evaluation.comment ?? ""))
+    if (evaluation.strengths) evaluation.strengths.forEach(s => evaluator.log(chalk.green("  + " + s)))
+    if (evaluation.improvements) evaluation.improvements.forEach(i => evaluator.log(chalk.yellow("  ~ " + i)))
+
+    console.log(chalk.cyan("\n╔══ Phase " + (multiWorker ? "7" : "6") + ": Onchain Settlement ══╗"))
+    if (evaluation.approved !== false && evaluation.recommendation !== "reject") {
+      await evaluator.completeJob(jobId)
+      await sleep(800)
+      try { await evaluator.recordReputation(selectedWorker.agentId, evaluation.score ?? 80, evaluation.comment ?? "Good work") }
+      catch { evaluator.log(chalk.gray("ℹ️  Reputation requires different wallet")) }
+    } else {
+      evaluator.log(chalk.red("✗ Job rejected"))
+    }
+
+    console.log(chalk.green("\n╔══ Result ══╗"))
+    console.log("  Task Type:     " + task.type)
+    console.log("  Mode:          " + (multiWorker ? "Multi-Worker Auction" : "Single Worker"))
+    if (multiWorker) console.log("  Workers:       " + workers.length + " competed, " + selectedWorker.name + " won")
+    console.log("  Orchestrator:  #" + orchestrator.agentId)
+    console.log("  Winner:        " + selectedWorker.name + " #" + selectedWorker.agentId)
+    console.log("  Evaluator:     #" + evaluator.agentId)
+    console.log("  Job ID:        #" + jobId)
+    console.log("  Status:        " + (evaluation.approved !== false ? "Completed ✓" : "Rejected ✗"))
+    console.log("  Score:         " + evaluation.score + "/100")
+    console.log("  Explorer:      https://testnet.arcscan.app\n")
   }
-
-  const orchBalAfter = await publicClient.readContract({ address: CONTRACTS.USDC, abi: USDC_ABI, functionName: "balanceOf", args: [orchestrator.address] })
-  const winnerBalAfter = await publicClient.readContract({ address: CONTRACTS.USDC, abi: USDC_ABI, functionName: "balanceOf", args: [selectedWorker.address] })
-  const orchBal2 = await publicClient.readContract({ address: CONTRACTS.USDC, abi: USDC_ABI, functionName: "balanceOf", args: [orchestrator.address] })
-
-  console.log(chalk.green("\n╔══ Result ══╗"))
-  console.log("  Task Type:     " + task.type)
-  console.log("  Mode:          " + (multiWorker ? "Multi-Worker Auction" : "Single Worker"))
-  if (multiWorker) console.log("  Workers:       " + workers.length + " competed, " + selectedWorker.name + " won")
-  console.log("  Orchestrator:  #" + orchestrator.agentId)
-  console.log("  Winner:        " + selectedWorker.name + " #" + selectedWorker.agentId)
-  console.log("  Evaluator:     #" + evaluator.agentId)
-  console.log("  Job ID:        #" + jobId)
-  console.log("  Status:        " + (evaluation.approved !== false ? "Completed ✓" : "Rejected ✗"))
-  console.log("  Score:         " + evaluation.score + "/100")
-  console.log("  Explorer:      https://testnet.arcscan.app\n")
 }
 
 main().catch(e => { console.error(chalk.red("\n✗ Error: " + e.message + "\n")); process.exit(1) })
