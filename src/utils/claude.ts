@@ -32,7 +32,23 @@ function mockResponse(prompt: string): string {
     // evaluateCount ile takip et
     if (!globalThis._evalCount) globalThis._evalCount = 0
     globalThis._evalCount++
-    if (globalThis._evalCount === 1) {
+    // --retry modunda ilk reject, sonra approve
+    // --chain modunda hep approve
+    const isChain = prompt.includes("CHAIN") || prompt.includes("built_on") || prompt.includes("builds on previous")
+    if (isChain) {
+      return JSON.stringify({
+        approved: true,
+        score: 88,
+        comment: "Chain step deliverable meets all criteria. Well-structured and builds on previous output.",
+        criteria_met: ["Builds on previous step", "Meets quality bar", "Actionable output"],
+        criteria_failed: [],
+        strengths: ["Clear methodology", "Good use of previous data", "Actionable insights"],
+        improvements: [],
+        recommendation: "approve"
+      })
+    }
+    const shouldReject = globalThis._evalCount === 1
+    if (shouldReject) {
       return JSON.stringify({
         approved: false,
         score: 45,

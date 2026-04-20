@@ -7,6 +7,7 @@ import { TASK_TEMPLATES } from "./tasks/types.js"
 import { orchestratorPrompt, workerPrompt, evaluatorPrompt } from "./tasks/prompts.js"
 import { workerBid, selectBestWorker, displayAuction } from "./tasks/auction.js"
 import { runWithRetry } from "./tasks/retry.js"
+import { runTaskChain, CHAIN_TEMPLATES } from "./tasks/chain.js"
 import chalk from "chalk"
 
 console.log(chalk.cyan.bold(`
@@ -47,7 +48,15 @@ function showTaskMenu() {
   console.log(chalk.gray("  Example:"))
   console.log(chalk.gray("    npx tsx src/index.ts data_analysis --multi-worker"))
   console.log(chalk.gray("    npx tsx src/index.ts data_analysis --retry"))
-  console.log(chalk.gray("    npx tsx src/index.ts data_analysis --retry --max-attempts 3\n"))
+  console.log(chalk.gray("    npx tsx src/index.ts data_analysis --retry --max-attempts 3"))
+  console.log(chalk.gray("    npx tsx src/index.ts --chain research_to_analysis"))
+  console.log(chalk.gray("    npx tsx src/index.ts --chain audit_pipeline\n"))
+  console.log(chalk.cyan("  Chain Templates:\n"))
+  for (const [key, c] of Object.entries(CHAIN_TEMPLATES)) {
+    console.log("  " + chalk.white(key.padEnd(30)) + " " + c.steps.length + " steps")
+    console.log(chalk.gray("    " + c.description))
+    console.log()
+  }
 }
 
 async function checkBalance(address, label) {
@@ -60,6 +69,43 @@ async function checkBalance(address, label) {
 }
 
 async function main() {
+  // Chain mode
+  const chainMode = args.includes("--chain")
+  const chainName = chainMode ? args[args.indexOf("--chain") + 1] : null
+
+  if (chainMode && chainName && CHAIN_TEMPLATES[chainName]) {
+    const chain = CHAIN_TEMPLATES[chainName]
+    const orchestratorKey2 = process.env.ORCHESTRATOR_KEY ?? generatePrivateKey()
+    const evaluatorKey2    = process.env.EVALUATOR_KEY    ?? generatePrivateKey()
+    const workerKey2       = process.env.WORKER_KEY       ?? generatePrivateKey()
+
+    const orc = new ArcAgent({ name: "Orchestrator", role: "orchestrator", privateKey: orchestratorKey2, capabilities: ["coordination"] })
+    const wrk = new ArcAgent({ name: "Worker",       role: "worker",       privateKey: workerKey2,       capabilities: ["research","data-analysis","solidity","blockchain"] })
+    const evl = new ArcAgent({ name: "Evaluator",    role: "evaluator",    privateKey: evaluatorKey2,    capabilities: ["quality-assessment"] })
+
+    console.log(chalk.cyan("\n╔══ Balances ══╗"))
+    const bal = await publicClient.readContract({ address: CONTRACTS.USDC, abi: USDC_ABI, functionName: "balanceOf", args: [orc.address] }) as bigint
+    console.log("  Orchestrator: " + formatUSDC(bal) + " USDC")
+
+    console.log(chalk.cyan("\n╔══ Phase 1: ERC-8004 Registration ══╗"))
+    await orc.register(); await sleep(600)
+    await wrk.register(); await sleep(600)
+    await evl.register()
+
+    const results = await runTaskChain(orc, [wrk], evl, chain)
+
+    console.log(chalk.green("\n╔══ Chain Result ══╗"))
+    console.log("  Chain:    " + chain.name)
+    console.log("  Steps:    " + results.length + "/" + chain.steps.length)
+    console.log("  Success:  " + results.filter(r => r.approved).length + "/" + results.length)
+    results.forEach((r, i) => {
+      const status = r.approved ? chalk.green("✓") : chalk.red("✗")
+      console.log("  Step " + (i+1) + ":   " + status + " " + r.taskType + " — Job #" + r.jobId + " — " + r.score + "/100")
+    })
+    console.log("  Explorer: https://testnet.arcscan.app\n")
+    return
+  }
+
   if (!taskTypeArg || !TASK_TEMPLATES[taskTypeArg]) {
     showTaskMenu()
     return
