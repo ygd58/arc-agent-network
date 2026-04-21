@@ -47,7 +47,7 @@ function mockResponse(prompt: string): string {
         recommendation: "approve"
       })
     }
-    const shouldReject = globalThis._evalCount === 1
+    const shouldReject = false  // normal flow hep approve
     if (shouldReject) {
       return JSON.stringify({
         approved: false,

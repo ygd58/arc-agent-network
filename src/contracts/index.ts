@@ -20,6 +20,9 @@ export const IDENTITY_ABI = [
   { name: "ownerOf", type: "function", stateMutability: "view",
     inputs: [{ name: "tokenId", type: "uint256" }],
     outputs: [{ name: "", type: "address" }] },
+  { name: "tokenURI", type: "function", stateMutability: "view",
+    inputs: [{ name: "tokenId", type: "uint256" }],
+    outputs: [{ name: "", type: "string" }] },
   { name: "totalSupply", type: "function", stateMutability: "view",
     inputs: [], outputs: [{ name: "", type: "uint256" }] },
 ] as const

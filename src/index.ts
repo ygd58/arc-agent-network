@@ -8,6 +8,7 @@ import { orchestratorPrompt, workerPrompt, evaluatorPrompt } from "./tasks/promp
 import { workerBid, selectBestWorker, displayAuction } from "./tasks/auction.js"
 import { runWithRetry } from "./tasks/retry.js"
 import { runTaskChain, CHAIN_TEMPLATES } from "./tasks/chain.js"
+import { showLeaderboard } from "./commands/leaderboard.js"
 import chalk from "chalk"
 
 console.log(chalk.cyan.bold(`
@@ -69,6 +70,12 @@ async function checkBalance(address, label) {
 }
 
 async function main() {
+  if (args.includes("--leaderboard")) {
+    const top = args.includes("--top") ? parseInt(args[args.indexOf("--top") + 1]) : 10
+    await showLeaderboard(top)
+    return
+  }
+
   // Chain mode
   const chainMode = args.includes("--chain")
   const chainName = chainMode ? args[args.indexOf("--chain") + 1] : null
@@ -201,6 +208,18 @@ async function main() {
     "[" + task.type.toUpperCase() + "] " + (assignment.task ?? task.description),
     task.budget
   )
+
+  if (!retryMode) {
+    // NORMAL FLOW — Worker Execute
+    console.log(chalk.cyan("\n╔══ Phase " + (multiWorker ? "5" : "4") + ": Worker Executing ══╗"))
+    await sleep(1500)
+    const deliveryRaw = await selectedWorker.think(workerPrompt(task, assignment))
+    var delivery: any = {}
+    try { delivery = JSON.parse(deliveryRaw) } catch { delivery = { result: deliveryRaw } }
+    selectedWorker.log(chalk.white("Result: " + (delivery.result ?? "").slice(0, 80) + "..."))
+    if (delivery.key_findings) delivery.key_findings.slice(0, 3).forEach((f: string) => selectedWorker.log(chalk.gray("  → " + f)))
+    await selectedWorker.submitJob(jobId, JSON.stringify(delivery))
+  }
 
   if (retryMode) {
     // RETRY FLOW
