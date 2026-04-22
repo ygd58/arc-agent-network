@@ -12,6 +12,12 @@ const TRANSFER_EVENT = {
   ],
 }
 
+const REPUTATION_ABI = [{
+  name: "getReputation", type: "function", stateMutability: "view",
+  inputs: [{ name: "agentId", type: "uint256" }],
+  outputs: [{ name: "totalScore", type: "int256" }, { name: "count", type: "uint256" }]
+}] as const
+
 export async function showLeaderboard(topN: number = 10) {
   console.log(chalk.cyan.bold("\n╔══ ERC-8004 Agent Leaderboard ══╗"))
   console.log(chalk.gray("  Arc Testnet — Most active agents\n"))
@@ -32,7 +38,7 @@ export async function showLeaderboard(topN: number = 10) {
 
   console.log(chalk.gray("  Found " + mintLogs.length + " agents in last 9000 blocks\n"))
 
-  type Entry = { id: bigint; owner: string; name: string; role: string }
+  type Entry = { id: bigint; owner: string; name: string; role: string; repScore: number; repCount: number }
   const agents: Entry[] = []
 
   for (const log of mintLogs) {
@@ -59,7 +65,21 @@ export async function showLeaderboard(topN: number = 10) {
         meta = JSON.parse(json)
       } catch(e: any) { console.error("Error #" + tokenId + ":", e.message) }
 
-      agents.push({ id: tokenId, owner, name: meta.name ?? "Unknown", role: meta.role ?? "unknown" })
+      // Reputation al
+      let repScore = 0
+      let repCount = 0
+      try {
+        const rep = await publicClient.readContract({
+          address: CONTRACTS.REPUTATION_REGISTRY,
+          abi: REPUTATION_ABI,
+          functionName: "getReputation",
+          args: [tokenId],
+        }) as [bigint, bigint]
+        repScore = Number(rep[0])
+        repCount = Number(rep[1])
+      } catch {}
+
+      agents.push({ id: tokenId, owner, name: meta.name ?? "Unknown", role: meta.role ?? "unknown", repScore, repCount })
       process.stdout.write(chalk.gray("\r  Loading #" + tokenId + "..."))
     } catch(e: any) { console.error("Error #" + tokenId + ":", e.message) }
   }
@@ -71,15 +91,20 @@ export async function showLeaderboard(topN: number = 10) {
 
   const sorted = [...agents].sort((a, b) => (ownerCount[b.owner] ?? 0) - (ownerCount[a.owner] ?? 0)).slice(0, topN)
 
+  // Reputation varsa reputation'a göre sırala
+  const hasRep = sorted.some(a => a.repCount > 0)
+  if (hasRep) sorted.sort((a, b) => b.repScore - a.repScore)
+
   console.log(
     chalk.white("  Rank".padEnd(7)) +
     chalk.white("ID".padEnd(9)) +
     chalk.white("Role".padEnd(15)) +
-    chalk.white("Name".padEnd(22)) +
+    chalk.white("Name".padEnd(18)) +
+    chalk.white("Rep Score".padEnd(12)) +
     chalk.white("Jobs".padEnd(8)) +
     chalk.white("Owner")
   )
-  console.log(chalk.gray("  " + "─".repeat(80)))
+  console.log(chalk.gray("  " + "─".repeat(88)))
 
   sorted.forEach((agent, idx) => {
     const rank = idx + 1
@@ -87,11 +112,15 @@ export async function showLeaderboard(topN: number = 10) {
     const roleColor = agent.role === "orchestrator" ? chalk.magenta
                     : agent.role === "worker" ? chalk.cyan
                     : agent.role === "evaluator" ? chalk.yellow : chalk.white
+    const repStr = agent.repCount > 0
+      ? chalk.green("+" + agent.repScore + " (" + agent.repCount + "x)")
+      : chalk.gray("no rep")
     console.log(
       "  " + medal + " ".padEnd(4) +
       chalk.cyan(("#" + agent.id).padEnd(9)) +
       roleColor(agent.role.padEnd(15)) +
-      chalk.white(agent.name.slice(0, 20).padEnd(22)) +
+      chalk.white(agent.name.slice(0, 16).padEnd(18)) +
+      repStr.padEnd(20) +
       chalk.green((ownerCount[agent.owner] + "x").padEnd(8)) +
       chalk.gray(agent.owner.slice(0, 10) + "..." + agent.owner.slice(-6))
     )

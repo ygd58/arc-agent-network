@@ -84,14 +84,13 @@ export class ArcAgent {
 
   // ERC-8004: Reputation kaydet
   async recordReputation(targetAgentId: bigint, score: number, comment: string) {
-    const hash = await this.clients.wallet.writeContract({
-      address: CONTRACTS.REPUTATION_REGISTRY,
-      abi: REPUTATION_ABI,
-      functionName: "record",
-      args: [targetAgentId, BigInt(score), comment],
-    })
-    await publicClient.waitForTransactionReceipt({ hash })
-    this.log(chalk.green(`✓ Reputation kaydedildi — Agent #${targetAgentId}: ${score > 0 ? "+" : ""}${score}`))
+    const { recordReputation } = await import("../commands/reputation.js")
+    const validatorKey = process.env.VALIDATOR_KEY
+    const hash = await recordReputation(targetAgentId, score, comment, validatorKey)
+    if (hash) {
+      this.log(chalk.green(`✓ Reputation kaydedildi — Agent #${targetAgentId}: ${score > 0 ? "+" : ""}${score}`))
+      this.log(chalk.gray(`  TX: ${hash.slice(0, 20)}...`))
+    }
   }
 
   // ERC-8183: İş oluştur
@@ -162,6 +161,21 @@ export class ArcAgent {
     await publicClient.waitForTransactionReceipt({ hash })
     this.log(chalk.green(`✓ Teslim edildi — Job #${jobId}`))
     this.log(chalk.gray(`  Hash: ${keccak256(toHex(deliverable)).slice(0, 20)}...`))
+  }
+
+  // ERC-8004: Validator'a feedback yetkisi ver
+  async authorizeFeedback(validatorAddress: string, indexLimit: number = 100) {
+    const expiry = Math.floor(Date.now() / 1000) + 7 * 86400 // 7 gün
+    const { REPUTATION_ABI_FULL } = await import("../contracts/index.js")
+    const hash = await this.clients.wallet.writeContract({
+      address: CONTRACTS.REPUTATION_REGISTRY,
+      abi: REPUTATION_ABI_FULL,
+      functionName: "authorizeFeedback",
+      args: [this.agentId, validatorAddress as `0x${string}`, BigInt(indexLimit), BigInt(expiry)],
+    })
+    await publicClient.waitForTransactionReceipt({ hash })
+    this.log(chalk.green(`✓ Feedback yetkisi verildi → ${validatorAddress.slice(0,10)}...`))
+    return hash
   }
 
   // ERC-8183: İşi onayla
