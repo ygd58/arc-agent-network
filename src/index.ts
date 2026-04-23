@@ -9,6 +9,7 @@ import { workerBid, selectBestWorker, displayAuction } from "./tasks/auction.js"
 import { runWithRetry } from "./tasks/retry.js"
 import { runTaskChain, CHAIN_TEMPLATES } from "./tasks/chain.js"
 import { showLeaderboard } from "./commands/leaderboard.js"
+import { showAgentStats, showNetworkStats } from "./commands/stats.js"
 import chalk from "chalk"
 
 console.log(chalk.cyan.bold(`
@@ -70,6 +71,13 @@ async function checkBalance(address, label) {
 }
 
 async function main() {
+  if (args.includes("--stats")) {
+    const agentId = args.includes("--agent") ? args[args.indexOf("--agent") + 1] : null
+    if (agentId) { await showAgentStats(agentId); return }
+    await showNetworkStats()
+    return
+  }
+
   if (args.includes("--leaderboard")) {
     const top = args.includes("--top") ? parseInt(args[args.indexOf("--top") + 1]) : 10
     await showLeaderboard(top)
