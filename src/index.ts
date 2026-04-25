@@ -7,6 +7,9 @@ import { TASK_TEMPLATES } from "./tasks/types.js"
 import { orchestratorPrompt, workerPrompt, evaluatorPrompt } from "./tasks/prompts.js"
 import { workerBid, selectBestWorker, displayAuction } from "./tasks/auction.js"
 import { runWithRetry } from "./tasks/retry.js"
+import { runMultiEval } from "./commands/multival.js"
+import { checkReputationGate, displayGateResult } from "./commands/gate.js"
+import { getLogger } from "./commands/commlog.js"
 import { runTaskChain, CHAIN_TEMPLATES } from "./tasks/chain.js"
 import { showLeaderboard } from "./commands/leaderboard.js"
 import { showAgentStats, showNetworkStats } from "./commands/stats.js"
@@ -29,6 +32,8 @@ const workerCount = args.includes("--workers")
   ? parseInt(args[args.indexOf("--workers") + 1]) 
   : 3
 const retryMode = args.includes("--retry")
+const multiEval = args.includes("--multi-eval")
+const evalCount = args.includes("--evaluators") ? parseInt(args[args.indexOf("--evaluators") + 1]) : 3
 const maxAttempts = args.includes("--max-attempts")
   ? parseInt(args[args.indexOf("--max-attempts") + 1])
   : 3
@@ -53,6 +58,8 @@ function showTaskMenu() {
   console.log(chalk.gray("    npx tsx src/index.ts data_analysis --retry --max-attempts 3"))
   console.log(chalk.gray("    npx tsx src/index.ts --chain research_to_analysis"))
   console.log(chalk.gray("    npx tsx src/index.ts --chain audit_pipeline\n"))
+  console.log(chalk.gray("    npx tsx src/index.ts research --multi-eval"))
+  console.log(chalk.gray("    npx tsx src/index.ts research --multi-eval --evaluators 3\n"))
   console.log(chalk.cyan("  Chain Templates:\n"))
   for (const [key, c] of Object.entries(CHAIN_TEMPLATES)) {
     console.log("  " + chalk.white(key.padEnd(30)) + " " + c.steps.length + " steps")
@@ -136,6 +143,7 @@ async function main() {
   console.log("  " + "Budget".padEnd(20) + " " + task.budget + " USDC")
   console.log("  " + "Mode".padEnd(20) + " " + mode)
   if (multiWorker) console.log("  " + "Workers".padEnd(20) + " " + workerCount + " competing")
+  if (multiEval) console.log("  " + "Multi-Eval".padEnd(20) + " " + chalk.cyan(evalCount + " evaluators voting"))
   if (retryMode) console.log("  " + "Retry Mode".padEnd(20) + " " + chalk.yellow("ON (max " + maxAttempts + " attempts)"))
 
   const orchestratorKey = process.env.ORCHESTRATOR_KEY ?? generatePrivateKey()
@@ -261,13 +269,30 @@ async function main() {
     // NORMAL FLOW
     console.log(chalk.cyan("\n╔══ Phase " + (multiWorker ? "6" : "5") + ": Evaluator Reviewing ══╗"))
     await sleep(1500)
-    const evalRaw = await evaluator.think(evaluatorPrompt(task, assignment, delivery))
-    let evaluation = {}
-    try { evaluation = JSON.parse(evalRaw) } catch { evaluation = { approved: true, score: 80, comment: "Completed" } }
-    evaluator.log(chalk.white("Score: " + evaluation.score + "/100"))
-    evaluator.log(chalk.white(evaluation.comment ?? ""))
-    if (evaluation.strengths) evaluation.strengths.forEach(s => evaluator.log(chalk.green("  + " + s)))
-    if (evaluation.improvements) evaluation.improvements.forEach(i => evaluator.log(chalk.yellow("  ~ " + i)))
+
+    let evaluation: any = {}
+
+    if (multiEval) {
+      // Multi-evaluator: birden fazla evaluator oylama yapar
+      const extraEvals = []
+      for (let ei = 1; ei < evalCount; ei++) {
+        const ekKey = process.env["EVALUATOR_KEY_" + (ei+1)] ?? evaluatorKey
+        const { ArcAgent } = await import("./agents/base.js")
+        const ekAgent = new ArcAgent({ name: "Evaluator-" + (ei+1), role: "evaluator", privateKey: ekKey, capabilities: ["quality-assessment"] })
+        extraEvals.push(ekAgent)
+      }
+      const allEvals = [evaluator, ...extraEvals]
+      const { runMultiEval } = await import("./commands/multival.js")
+      const multiResult = await runMultiEval(allEvals, task, assignment, delivery)
+      evaluation = { approved: multiResult.approved, score: multiResult.finalScore, comment: multiResult.comment }
+    } else {
+      const evalRaw = await evaluator.think(evaluatorPrompt(task, assignment, delivery))
+      try { evaluation = JSON.parse(evalRaw) } catch { evaluation = { approved: true, score: 80, comment: "Completed" } }
+      evaluator.log(chalk.white("Score: " + evaluation.score + "/100"))
+      evaluator.log(chalk.white(evaluation.comment ?? ""))
+      if (evaluation.strengths) evaluation.strengths.forEach((s: string) => evaluator.log(chalk.green("  + " + s)))
+      if (evaluation.improvements) evaluation.improvements.forEach((i: string) => evaluator.log(chalk.yellow("  ~ " + i)))
+    }
 
     console.log(chalk.cyan("\n╔══ Phase " + (multiWorker ? "7" : "6") + ": Onchain Settlement ══╗"))
     if (evaluation.approved !== false && evaluation.recommendation !== "reject") {
