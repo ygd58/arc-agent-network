@@ -53,6 +53,23 @@ export class ArcAgent {
   }
 
   // ERC-8004: Agent'ı zincire kaydet
+  private async sendWithRetry<T>(fn: () => Promise<T>, maxRetries = 5): Promise<T> {
+    for (let i = 0; i < maxRetries; i++) {
+      try {
+        return await fn()
+      } catch (e: any) {
+        if (e.message?.includes('txpool is full') && i < maxRetries - 1) {
+          const wait = (i + 1) * 5000
+          this.log(chalk.yellow(`⏳ txpool dolu — s bekleniyor (/)...`))
+          await sleep(wait)
+          continue
+        }
+        throw e
+      }
+    }
+    throw new Error('Max retries exceeded')
+  }
+
   async register(): Promise<bigint> {
     const metadata = {
       name: this.name,
@@ -66,12 +83,12 @@ export class ArcAgent {
 
     const uri = `data:application/json;base64,${Buffer.from(JSON.stringify(metadata)).toString("base64")}`
 
-    const hash = await this.clients.wallet.writeContract({
+    const hash = await this.sendWithRetry(() => this.clients.wallet.writeContract({
       address: CONTRACTS.IDENTITY_REGISTRY,
       abi: IDENTITY_ABI,
       functionName: "register",
       args: [uri],
-    })
+    }))
 
     const receipt = await publicClient.waitForTransactionReceipt({ hash })
     const tokenId = receipt.logs[0] ? BigInt(receipt.logs[0].topics[3] ?? "0x0") : 0n
